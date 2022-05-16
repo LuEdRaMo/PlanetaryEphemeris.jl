@@ -87,76 +87,86 @@ function taylorstep_threads!(f!, t::Taylor1{T}, x::Vector{Taylor1{U}},
     return δt
 end
 
+for V in (:(Val{true}), :(Val{false}))
+    @eval begin
+        function taylorinteg_threads(f!, q0::Array{U,1}, t0::T, tmax::T, order::Int, abstol::T, ::$V,
+            params = nothing; maxsteps::Int=500, parse_eqs::Bool=true) where {T<:Real, U<:Number}
+    
+            # Allocation
+            tv = Array{T}(undef, maxsteps+1)
+            dof = length(q0)
+            xv = Array{U}(undef, dof, maxsteps+1)
+            if $V == Val{true}
+                xv_interp = Array{Taylor1{U}}(undef, dof, maxsteps+1)
+            end
+        
+            # Initialize the vector of Taylor1 expansions
+            t = Taylor1(T, order)
+            x = Array{Taylor1{U}}(undef, dof)
+            dx = Array{Taylor1{U}}(undef, dof)
+            xaux = Array{Taylor1{U}}(undef, dof)
+            dx .= Taylor1.(zeros(U), order)
+        
+            # Initial conditions
+            @inbounds t[0] = t0
+            x .= Taylor1.(q0, order)
+            x0 = deepcopy(q0)
+            @inbounds tv[1] = t0
+            @inbounds xv[:,1] .= q0
+            sign_tstep = copysign(1, tmax-t0)
+        
+            # Determine if specialized jetcoeffs! method exists
+            parse_eqs = TaylorIntegration._determine_parsing!(parse_eqs, f!, t, x, dx, params)
+        
+            @show parse_eqs
+        
+            # Integration
+            nsteps = 1
+            while sign_tstep*t0 < sign_tstep*tmax
+                δt = taylorstep_threads!(f!, t, x, dx, xaux, abstol, params, parse_eqs) # δt is positive!
+                # δt = TaylorIntegration.taylorstep!(f!, t, x, dx, xaux, abstol, params, parse_eqs) # δt is positive!
+                # Below, δt has the proper sign according to the direction of the integration
+                δt = sign_tstep * min(δt, sign_tstep*(tmax-t0))
+                evaluate_threads!(x, δt, x0) # new initial condition
+                # evaluate!(x, δt, x0) # new initial condition
+                t0 += δt
+                @inbounds t[0] = t0
+                nsteps += 1
+                @inbounds tv[nsteps] = t0
+                if $V == Val{true}
+                    # @inbounds xv_interp[:,nsteps-1] .= deepcopy(x)
+                    Threads.@threads for i in eachindex(x0)
+                        @inbounds xv_interp[i,nsteps-1] = deepcopy(x[i])
+                    end
+                else
+                    # @inbounds xv[:,nsteps] .= x0
+                    Threads.@threads for i in eachindex(x0)
+                        @inbounds xv[i,nsteps] = x0[i]
+                    end
+                end
+                Threads.@threads for i in eachindex(x0)
+                    @inbounds x[i][0] = x0[i]
+                    @inbounds dx[i] = Taylor1( zero(x0[i]), order )
+                end
+                if nsteps > maxsteps
+                    @warn("""
+                    Maximum number of integration steps reached; exiting.
+                    """)
+                    break
+                end
+            end
+        
+            if $V == Val{true}
+                return TaylorInterpolant(tv[1], view(tv.-tv[1],1:nsteps), view(transpose(view(xv_interp,:,1:nsteps-1)),1:nsteps-1,:))
+            elseif $V == Val{false}
+                return view(tv,1:nsteps), view(transpose(view(xv,:,1:nsteps)),1:nsteps,:)
+            end
+        end
+    end
+end
+
 function taylorinteg_threads(f!, q0::Array{U,1}, t0::T, tmax::T, order::Int, abstol::T,
-        params = nothing; maxsteps::Int=500, parse_eqs::Bool=true, dense::Bool=false) where {T<:Real, U<:Number}
-
-    # Allocation
-    tv = Array{T}(undef, maxsteps+1)
-    dof = length(q0)
-    xv = Array{U}(undef, dof, maxsteps+1)
-    if dense
-        xv_interp = Array{Taylor1{U}}(undef, dof, maxsteps+1)
-    end
-
-    # Initialize the vector of Taylor1 expansions
-    t = Taylor1(T, order)
-    x = Array{Taylor1{U}}(undef, dof)
-    dx = Array{Taylor1{U}}(undef, dof)
-    xaux = Array{Taylor1{U}}(undef, dof)
-    dx .= Taylor1.(zeros(U), order)
-
-    # Initial conditions
-    @inbounds t[0] = t0
-    x .= Taylor1.(q0, order)
-    x0 = deepcopy(q0)
-    @inbounds tv[1] = t0
-    @inbounds xv[:,1] .= q0
-    sign_tstep = copysign(1, tmax-t0)
-
-    # Determine if specialized jetcoeffs! method exists
-    parse_eqs = TaylorIntegration._determine_parsing!(parse_eqs, f!, t, x, dx, params)
-
-    @show parse_eqs
-
-    # Integration
-    nsteps = 1
-    while sign_tstep*t0 < sign_tstep*tmax
-        δt = taylorstep_threads!(f!, t, x, dx, xaux, abstol, params, parse_eqs) # δt is positive!
-        # δt = TaylorIntegration.taylorstep!(f!, t, x, dx, xaux, abstol, params, parse_eqs) # δt is positive!
-        # Below, δt has the proper sign according to the direction of the integration
-        δt = sign_tstep * min(δt, sign_tstep*(tmax-t0))
-        evaluate_threads!(x, δt, x0) # new initial condition
-        # evaluate!(x, δt, x0) # new initial condition
-        t0 += δt
-        @inbounds t[0] = t0
-        nsteps += 1
-        @inbounds tv[nsteps] = t0
-        if dense
-            # @inbounds xv_interp[:,nsteps-1] .= deepcopy(x)
-            Threads.@threads for i in eachindex(x0)
-                @inbounds xv_interp[i,nsteps-1] = deepcopy(x[i])
-            end
-        else
-            # @inbounds xv[:,nsteps] .= x0
-            Threads.@threads for i in eachindex(x0)
-                @inbounds xv[i,nsteps] = x0[i]
-            end
-        end
-        Threads.@threads for i in eachindex(x0)
-            @inbounds x[i][0] = x0[i]
-            @inbounds dx[i] = Taylor1( zero(x0[i]), order )
-        end
-        if nsteps > maxsteps
-            @warn("""
-            Maximum number of integration steps reached; exiting.
-            """)
-            break
-        end
-    end
-
-    if dense
-        return TaylorInterpolant(tv[1], view(tv.-tv[1],1:nsteps), view(transpose(view(xv_interp,:,1:nsteps-1)),1:nsteps-1,:))
-    else
-        return view(tv,1:nsteps), view(transpose(view(xv,:,1:nsteps)),1:nsteps,:)
-    end
+    params = nothing; maxsteps::Int=500, parse_eqs::Bool=true) where {T<:Real, U<:Number}
+    return taylorinteg_threads(f!, q0, t0, tmax, order, abstol, Val(false), params; 
+    maxsteps = maxsteps, parse_eqs = parse_eqs)
 end

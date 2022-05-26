@@ -2,7 +2,7 @@
 function evaluate_threads!(x::Array{Taylor1{T},1}, δt::T,
         x0::Union{Array{T,1},SubArray{T,1}}) where {T<:Number}
     # @assert length(x) == length(x0)
-    Threads.@threads for i in eachindex(x, x0)
+    #= Threads.@threads =# @floop for i in eachindex(x, x0)
         x0[i] = evaluate( x[i], δt )
     end
     nothing
@@ -12,19 +12,21 @@ end
 function stepsize_threads(q::AbstractArray{Taylor1{U},1}, epsilon::T) where
         {T<:Real, U<:Number}
     R = promote_type(typeof(norm(constant_term(q[1]), Inf)), T)
-    h = convert(R, Inf)
-    #= Threads.@threads =# for i in eachindex(q)
+    # h = convert(R, Inf)
+    #= Threads.@threads =# @floop for i in eachindex(q)
+        @init h = convert(R, Inf)
         @inbounds hi = TaylorIntegration.stepsize( q[i], epsilon )
-        h = min( h, hi )
+        @reduce h = min( h, hi )
     end
     # If `isinf(h)==true`, we use the maximum (finite)
     # step-size obtained from all coefficients as above.
     # Note that the time step is independent from `epsilon`.
     if isinf(h)
-        h = zero(R)
-        #= Threads.@threads =# for i in eachindex(q)
+        # h = zero(R)
+        #= Threads.@threads =# @floop for i in eachindex(q)
+            @init h = zero(R)
             @inbounds hi = TaylorIntegration._second_stepsize(q[i], epsilon)
-            h = max( h, hi )
+            @reduce h = max( h, hi )
         end
     end
     return h::R
@@ -72,10 +74,10 @@ end
 
 function taylorstep_threads!(f!, t::Taylor1{T}, x::Vector{Taylor1{U}},
         dx::Vector{Taylor1{U}}, xaux::Vector{Taylor1{U}}, abstol::T, params,
-        parse_eqs::Bool=true) where {T<:Real, U<:Number}
+        tmpTaylor, arrTaylor, parse_eqs::Bool=true) where {T<:Real, U<:Number}
 
     # Compute the Taylor coefficients
-    TaylorIntegration.__jetcoeffs!(Val(parse_eqs), f!, t, x, dx, xaux, params)
+    TaylorIntegration.__jetcoeffs!(Val(parse_eqs), f!, t, x, dx, xaux, params, tmpTaylor, arrTaylor)
     # @time TaylorIntegration.__jetcoeffs!(Val(parse_eqs), f!, t, x, dx, xaux, params)
     # @time TaylorIntegration.__jetcoeffs!(Val(false), f!, t, x, dx, xaux, params)
     # @time TaylorIntegration.__jetcoeffs!(Val(true), f!, t, x, dx, xaux, params)
@@ -116,15 +118,15 @@ for V in (:(Val{true}), :(Val{false}))
             sign_tstep = copysign(1, tmax-t0)
         
             # Determine if specialized jetcoeffs! method exists
-            parse_eqs = TaylorIntegration._determine_parsing!(parse_eqs, f!, t, x, dx, params)
-        
+            parse_eqs, tmpTaylor, arrTaylor = TaylorIntegration._determine_parsing!(parse_eqs, f!, t, x, dx, params)            
+
             @show parse_eqs
         
             # Integration
             nsteps = 1
             while sign_tstep*t0 < sign_tstep*tmax
-                δt = taylorstep_threads!(f!, t, x, dx, xaux, abstol, params, parse_eqs) # δt is positive!
-                # δt = TaylorIntegration.taylorstep!(f!, t, x, dx, xaux, abstol, params, parse_eqs) # δt is positive!
+                δt = taylorstep_threads!(f!, t, x, dx, xaux, abstol, params, tmpTaylor, arrTaylor, parse_eqs) # δt is positive!
+                # taylorstep!(f!, t, x, dx, xaux, abstol, params, tmpTaylor, arrTaylor, parse_eqs) # δt is positive!
                 # Below, δt has the proper sign according to the direction of the integration
                 δt = sign_tstep * min(δt, sign_tstep*(tmax-t0))
                 evaluate_threads!(x, δt, x0) # new initial condition
@@ -135,16 +137,16 @@ for V in (:(Val{true}), :(Val{false}))
                 @inbounds tv[nsteps] = t0
                 if $V == Val{true}
                     # @inbounds xv_interp[:,nsteps-1] .= deepcopy(x)
-                    Threads.@threads for i in eachindex(x0)
+                    #= Threads.@threads =# @floop for i in eachindex(x0)
                         @inbounds xv_interp[i,nsteps-1] = deepcopy(x[i])
                     end
                 else
                     # @inbounds xv[:,nsteps] .= x0
-                    Threads.@threads for i in eachindex(x0)
+                    #= Threads.@threads =# @floop for i in eachindex(x0)
                         @inbounds xv[i,nsteps] = x0[i]
                     end
                 end
-                Threads.@threads for i in eachindex(x0)
+                #= Threads.@threads =# @floop for i in eachindex(x0)
                     @inbounds x[i][0] = x0[i]
                     @inbounds dx[i] = Taylor1( zero(x0[i]), order )
                 end
@@ -155,12 +157,13 @@ for V in (:(Val{true}), :(Val{false}))
                     break
                 end
             end
-        
+            
             if $V == Val{true}
                 return TaylorInterpolant(tv[1], view(tv.-tv[1],1:nsteps), view(transpose(view(xv_interp,:,1:nsteps-1)),1:nsteps-1,:))
             elseif $V == Val{false}
                 return view(tv,1:nsteps), view(transpose(view(xv,:,1:nsteps)),1:nsteps,:)
             end
+
         end
     end
 end
